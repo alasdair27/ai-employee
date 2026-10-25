@@ -4,6 +4,8 @@ import crypto from 'node:crypto';
 const port = Number(process.env.PORT || 3000);
 const signingSecret = process.env.SLACK_SIGNING_SECRET;
 const botToken = process.env.SLACK_BOT_TOKEN;
+const openaiKey = process.env.OPENAI_API_KEY;
+const openaiModel = process.env.OPENAI_MODEL || 'gpt-4.1-mini';
 const allowedChannel = process.env.SLACK_TASK_CHANNEL_ID;
 const seen = new Map();
 
@@ -29,6 +31,35 @@ async function postSlack(channel, text, threadTs) {
   });
   const result = await response.json();
   if (!response.ok || !result.ok) throw new Error('Slack message failed: ' + (result.error || response.status));
+}
+
+async function generateReply(message) {
+  if (!openaiKey) {
+    return "I'm online, but my OpenAI API key hasn't been configured yet. I can't reason through tasks until it is.";
+  }
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      authorization: 'Bearer ' + openaiKey,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      model: openaiModel,
+      instructions: "You are Sam, an AI operations and development assistant working in Slack. Be concise, practical and friendly. You can discuss GHL, websites and coding, but you have NO tools or ability to make changes yet. Never claim you completed a task or saved it to a queue. If asked to execute work, explain that execution tools are being built. Never request secrets in Slack.",
+      input: message.slice(0, 12000),
+      max_output_tokens: 450,
+      store: false
+    }),
+    signal: AbortSignal.timeout(45000)
+  });
+  if (!response.ok) {
+    console.error('OpenAI API request failed', response.status);
+    return "I couldn't reach my AI service right now. Please try again shortly.";
+  }
+  const data = await response.json();
+  const output = (data.output || []).flatMap(item => item.content || [])
+    .filter(item => item.type === 'output_text').map(item => item.text).join('\n').trim();
+  return output || "I received your message but couldn't generate a response. Please try again.";
 }
 
 const server = http.createServer(async (req, res) => {
@@ -60,9 +91,8 @@ const server = http.createServer(async (req, res) => {
   respond(200, { ok: true });
   // Prototype only: acknowledges messages; persistent tasks and execution are added next.
   try {
-    await postSlack(event.channel,
-      "Received your request. The cloud Slack listener is working. Task execution isn't enabled yet.",
-      isDM ? undefined : event.ts);
+    const reply = await generateReply(event.text);
+    await postSlack(event.channel, reply, isDM ? undefined : event.ts);
   } catch (error) { console.error('Slack notification error:', error.message); }
 });
 server.listen(port, '0.0.0.0', () => console.log('AI Employee listening on ' + port));
