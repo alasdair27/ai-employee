@@ -50,7 +50,9 @@ const server = http.createServer(async (req, res) => {
   if (body.type === 'url_verification') return respond(200, { challenge: body.challenge });
   if (body.type !== 'event_callback') return respond(200, { ok: true });
   const event = body.event || {};
-  if (event.type !== 'app_mention' || event.bot_id || !event.text) return respond(200, { ok: true });
+  const isMention = event.type === 'app_mention';
+  const isDM = event.type === 'message' && event.channel_type === 'im' && !event.subtype;
+  if ((!isMention && !isDM) || event.bot_id || !event.text) return respond(200, { ok: true });
   if (allowedChannel && event.channel !== allowedChannel) return respond(200, { ok: true });
   if (seen.has(body.event_id)) return respond(200, { ok: true });
   seen.set(body.event_id, Date.now());
@@ -60,7 +62,7 @@ const server = http.createServer(async (req, res) => {
   try {
     await postSlack(event.channel,
       "Received your request. The cloud Slack listener is working. Task execution isn't enabled yet.",
-      event.ts);
+      isDM ? undefined : event.ts);
   } catch (error) { console.error('Slack notification error:', error.message); }
 });
 server.listen(port, '0.0.0.0', () => console.log('AI Employee listening on ' + port));
