@@ -1,3 +1,4 @@
+import { initialize, addTasks, listTasks, updateTask, databaseConfigured } from './tasks.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
 
@@ -62,6 +63,30 @@ async function generateReply(message) {
   return output || "I received your message but couldn't generate a response. Please try again.";
 }
 
+async function handleTaskCommand(event) {
+  const text = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
+  const command = text.toLowerCase();
+  if (command === 'tasks' || command === 'list tasks') {
+    const tasks = await listTasks(event.channel,event.user);
+    return tasks.length ? tasks.map(t => '#' + t.id + ' [' + t.status + '] ' + t.description).join('\n') : 'Your task queue is empty.';
+  }
+  if (/^(done|complete|block|cancel)\s+#?\d+$/i.test(text)) {
+    const [action,number] = text.split(/\s+#?/);
+    const status = ({done:'completed',complete:'completed',block:'blocked',cancel:'cancelled'})[action.toLowerCase()];
+    const task=await updateTask(event.channel,event.user,Number(number),status);
+    return task ? 'Updated #' + task.id + ' to ' + task.status + ': ' + task.description : 'Task not found or already closed.';
+  }
+  if (/^add(?: tasks?)?:?\s*/i.test(text)) {
+    const content=text.replace(/^add(?: tasks?)?:?\s*/i,'').trim();
+    const descriptions=content.split(/\n/).map(line=>line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/,'').trim()).filter(Boolean);
+    if (!descriptions.length) return 'Send: add tasks: followed by one task per line.';
+    if (descriptions.length > 20 || descriptions.some(t=>t.length > 1000)) return 'Please send up to 20 tasks, each under 1,000 characters.';
+    const tasks=await addTasks(event.channel,event.user,descriptions);
+    return 'Saved ' + tasks.length + ' task(s):\n' + tasks.map(t=>'#'+t.id+' [queued] '+t.description).join('\n') + '\n\nThese are queued, not executed yet.';
+  }
+  return null;
+}
+
 const server = http.createServer(async (req, res) => {
   const respond = (status, data) => {
     res.writeHead(status, { 'content-type': 'application/json' });
@@ -91,8 +116,23 @@ const server = http.createServer(async (req, res) => {
   respond(200, { ok: true });
   // Prototype only: acknowledges messages; persistent tasks and execution are added next.
   try {
-    const reply = await generateReply(event.text);
+    const cleaned = event.text.replace(/<@[A-Z0-9]+>/g, '').trim();
+    let reply;
+    if (/^(tasks|list tasks|add\b|done\b|complete\b|block\b|cancel\b)/i.test(cleaned)) {
+      if (!databaseConfigured) {
+        reply = 'My task database is not connected yet. Please configure DATABASE_URL in Render.';
+      } else {
+        try { reply = await handleTaskCommand(event); }
+        catch (error) { console.error('Task command failed:', error.message); reply = 'I could not access the task database. Please try again.'; }
+      }
+    }
+    if (!reply) reply = await generateReply(event.text);
     await postSlack(event.channel, reply, isDM ? undefined : event.ts);
   } catch (error) { console.error('Slack notification error:', error.message); }
 });
-server.listen(port, '0.0.0.0', () => console.log('AI Employee listening on ' + port));
+initialize().then(() => {
+  server.listen(port, '0.0.0.0', () => console.log('AI Employee listening on ' + port));
+}).catch(error => {
+  console.error('Database initialization failed:', error.message);
+  process.exit(1);
+});
