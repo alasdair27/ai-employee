@@ -100,16 +100,23 @@ const server = http.createServer(async (req, res) => {
     raw += chunk;
     if (raw.length > 1024 * 1024) return respond(413, { error: 'too_large' });
   }
-  if (!validSlackSignature(req, raw)) return respond(401, { error: 'invalid_signature' });
+  if (!validSlackSignature(req, raw)) { console.warn('Slack event rejected: invalid signature'); return respond(401, { error: 'invalid_signature' }); }
   let body;
   try { body = JSON.parse(raw); } catch { return respond(400, { error: 'invalid_json' }); }
   if (body.type === 'url_verification') return respond(200, { challenge: body.challenge });
   if (body.type !== 'event_callback') return respond(200, { ok: true });
   const event = body.event || {};
+  console.log('Slack event received', { type: event.type, channelType: event.channel_type, subtype: event.subtype || null, eventId: body.event_id || null });
   const isMention = event.type === 'app_mention';
   const isDM = event.type === 'message' && event.channel_type === 'im' && !event.subtype;
-  if ((!isMention && !isDM) || event.bot_id || !event.text) return respond(200, { ok: true });
-  if (allowedChannel && event.channel !== allowedChannel) return respond(200, { ok: true });
+  if ((!isMention && !isDM) || event.bot_id || !event.text) {
+    console.log('Slack event ignored', { reason: 'unsupported_event_or_bot_or_empty', type: event.type, channelType: event.channel_type });
+    return respond(200, { ok: true });
+  }
+  if (allowedChannel && !isDM && event.channel !== allowedChannel) {
+    console.log('Slack event ignored', { reason: 'channel_not_allowed' });
+    return respond(200, { ok: true });
+  }
   if (seen.has(body.event_id)) return respond(200, { ok: true });
   seen.set(body.event_id, Date.now());
   for (const [key, time] of seen) if (Date.now() - time > 600000) seen.delete(key);
@@ -128,6 +135,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (!reply) reply = await generateReply(event.text);
     await postSlack(event.channel, reply, isDM ? undefined : event.ts);
+    console.log('Slack reply sent', { eventId: body.event_id || null, isDM });
   } catch (error) { console.error('Slack notification error:', error.message); }
 });
 initialize().then(() => {
